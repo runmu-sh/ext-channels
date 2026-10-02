@@ -150,3 +150,52 @@ test('hhmm', () => {
   const d = new Date(2026, 0, 2, 7, 5);
   assert.equal(hhmm(d.getTime()), '07:05');
 });
+
+// ── 1.1.0 ──
+import { groupedIds, GROUP_MS, firstUnreadId, newerThan, atBottom, replyText, badgeOf, moveIndex } from '../src/logic.ts';
+
+test('groupedIds: same sender within five minutes continues the group', () => {
+  const t0 = Date.UTC(2026, 9, 1, 4, 0);
+  const m = (id, sender, dt) => ({ id, ts: t0 + dt, sender, text: 'x', mention: false });
+  const list = [m(1, 'Orrin', 0), m(2, 'Orrin', 60_000), m(3, 'Quill', 61_000), m(4, 'Quill', 61_000 + GROUP_MS), m(5, '', 62_000 + GROUP_MS), m(6, '', 62_000 + GROUP_MS)];
+  assert.deepEqual([...groupedIds(list)], [2]);
+});
+
+test('firstUnreadId and newerThan', () => {
+  assert.equal(firstUnreadId(MSGS, 0), null);
+  assert.equal(firstUnreadId(MSGS, 2), 3);
+  assert.equal(firstUnreadId(MSGS, 99), 1, 'more unread than kept: the oldest kept');
+  assert.equal(firstUnreadId([], 3), null);
+  assert.equal(newerThan(MSGS, null), 0);
+  assert.equal(newerThan(MSGS, 4), 0);
+  assert.equal(newerThan(MSGS, 2), 2);
+  assert.equal(newerThan(MSGS, 999), 4, 'the last seen message dropped off: all of them');
+});
+
+test('atBottom allows a little slack', () => {
+  assert.equal(atBottom({ scrollTop: 476, scrollHeight: 600, clientHeight: 100 }), true);
+  assert.equal(atBottom({ scrollTop: 400, scrollHeight: 600, clientHeight: 100 }), false);
+});
+
+test('replyText: @sender: text', () => {
+  assert.equal(replyText('Orrin', 'on my way'), '@Orrin: on my way');
+  assert.equal(replyText('', 'plain'), 'plain');
+});
+
+test('badgeOf: the unread total of unmuted channels, null when none', () => {
+  assert.deepEqual(badgeOf(view({ channels: [chan('vox', { unread: 2 }), chan('ooc', { unread: 3, muted: true }), chan('t', { unread: 1 })] })), { count: 3 });
+  assert.equal(badgeOf(view()), null);
+  assert.equal(badgeOf(null), null);
+});
+
+test('moveIndex: arrows, Home, End; from the list itself the newest', () => {
+  assert.equal(moveIndex('ArrowUp', -1, 5), 4);
+  assert.equal(moveIndex('ArrowDown', -1, 5), 4);
+  assert.equal(moveIndex('ArrowUp', 2, 5), 1);
+  assert.equal(moveIndex('ArrowUp', 0, 5), 0);
+  assert.equal(moveIndex('ArrowDown', 4, 5), 4);
+  assert.equal(moveIndex('Home', 3, 5), 0);
+  assert.equal(moveIndex('End', 0, 5), 4);
+  assert.equal(moveIndex('x', 0, 5), null);
+  assert.equal(moveIndex('ArrowUp', -1, 0), null);
+});

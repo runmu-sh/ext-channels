@@ -1,0 +1,9 @@
+{
+  "$comment": "Comm.Channel.List: the channels, in rail order. An item is a channel name, or { name, caption?, command? }. Extra fields are allowed.",
+  "type": "array",
+  "items": {
+    "type": ["string", "object"],
+    "required": ["name"],
+    "properties": { "name": { "type": "string" }, "caption": { "type": "string" }, "command": { "type": "string" } }
+  }
+}

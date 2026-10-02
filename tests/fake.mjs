@@ -9,7 +9,8 @@ export function view(over = {}) {
   return { known: true, active: 'vox', channels: [chan('vox'), chan('ooc')], messages: {}, ...over };
 }
 
-export function fakeMu(initial = null) {
+/** `sessions`: the session ids `mu.sessions.each` runs for (none by default, so the panel tests see only the panel). */
+export function fakeMu(initial = null, { sessions = [] } = {}) {
   const calls = [];
   const registered = [];
   const handlers = [];
@@ -25,8 +26,16 @@ export function fakeMu(initial = null) {
       register(spec) { registered.push(spec); return () => {}; },
       open(...a) { calls.push(['panels.open', ...a]); },
       autoAdd(...a) { calls.push(['panels.autoAdd', ...a]); },
+      touch(...a) { calls.push(['panels.touch', ...a]); },
+      badge(...a) { calls.push(['panels.badge', ...a]); },
       vue(component) { const m = () => () => {}; m.component = component; return m; },
       close() {}, update() {}, openWeb() { return 'blocked'; }, closeWeb() {},
+    },
+    sessions: { each(fn) { const ds = sessions.map((id) => fn({ id, worldId: 'w' })); return () => { for (const d of ds) if (typeof d === 'function') d(); }; } },
+    menus: {
+      contexts: [], targets: [],
+      context(spec) { this.contexts.push(spec); return () => {}; },
+      target(el, t) { this.targets.push(t); return () => {}; },
     },
     gmcp: { on(pkg, fn) { handlers.push([pkg, fn]); return () => {}; }, state() {}, send: async () => false, supports: () => () => {} },
     channels: {
@@ -46,7 +55,7 @@ export function fakeMu(initial = null) {
     ui: {
       style(css) { styles.push(css); return () => {}; },
       toast() {},
-      css: { btn: 'btn', primary: 'btn primary', tool: 'tool', chip: 'chip', inp: 'inp', secHead: 'sec-head', empty: 'empty', framed: 'framed', badge: 'badge', lamp: 'lamp', glow: 'glow-text', cmd: 'sh-cmd', toggle: 'sh-toggle', plate: 'sh-plate', count: 'sh-count', field: 'sh-field', row: 'sh-row', label: 'sh-label' },
+      css: { btn: 'btn', primary: 'btn primary', tool: 'tool', chip: 'chip', inp: 'inp', secHead: 'sec-head', empty: 'empty', framed: 'framed', badge: 'badge', lamp: 'lamp', glow: 'glow-text', cmd: 'sh-cmd', toggle: 'sh-toggle', plate: 'sh-plate', count: 'sh-count', field: 'sh-field', row: 'sh-row', label: 'sh-label', sq: 'sq' },
     },
     log: { info() {}, warn() {}, error() {} },
   };

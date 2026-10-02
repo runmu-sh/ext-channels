@@ -126,3 +126,57 @@ export const popOutArgs = (ch: Pick<ChannelView, 'key' | 'caption'>, sid: string
   ['channel', { channel: ch.key, instance: ch.key }, { sid, title: COPY.soloTitle(ch.caption) }] as const;
 
 export const hhmm = (ts: number) => { const d = new Date(ts); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+
+// ── 1.1.0: grouping, the new-messages divider, the latest button, replies, the badge ──
+
+/** Messages from the same sender within this many ms of the previous one are grouped (no time, no sender). */
+export const GROUP_MS = 5 * 60_000;
+/** The ids of the messages that continue the previous one's group: same sender, within {@link GROUP_MS}. */
+export function groupedIds(msgs: readonly ChannelMessage[]): Set<number> {
+  const out = new Set<number>();
+  for (let i = 1; i < msgs.length; i++) {
+    const a = msgs[i - 1], b = msgs[i];
+    if (b.sender && a.sender === b.sender && b.ts - a.ts >= 0 && b.ts - a.ts < GROUP_MS) out.add(b.id);
+  }
+  return out;
+}
+
+/**
+ * The first unread message of a channel the player is switching to: with `unread` unread messages at the end of
+ * `msgs`, the id of the oldest of them, or null when nothing is unread.
+ */
+export function firstUnreadId(msgs: readonly ChannelMessage[], unread: number): number | null {
+  if (!unread || !msgs.length) return null;
+  return msgs[Math.max(0, msgs.length - unread)].id;
+}
+
+/** How many messages are newer than `lastSeen` (an id); all of them when `lastSeen` is not in the list. */
+export function newerThan(msgs: readonly ChannelMessage[], lastSeen: number | null): number {
+  if (lastSeen === null) return 0;
+  let n = 0;
+  for (let i = msgs.length - 1; i >= 0 && msgs[i].id !== lastSeen; i--) n++;
+  return n;
+}
+
+/** Within this many px of the bottom the list counts as at the bottom (it then follows new messages). */
+export const BOTTOM_SLACK = 24;
+export const atBottom = (el: { scrollTop: number; scrollHeight: number; clientHeight: number }) => el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_SLACK;
+
+/** What the composer sends while replying to `sender`: `@sender: text` (Underspire's reply form). */
+export const replyText = (sender: string, text: string) => (sender ? `@${sender}: ${text}` : text);
+
+/** The Channels tab badge for a session: the unread total of its channels, or null when nothing is unread. */
+export function badgeOf(v: ChannelsView | null): { count: number } | null {
+  const n = (v?.channels ?? []).reduce((s, c) => s + (c.muted ? 0 : c.unread), 0);
+  return n > 0 ? { count: n } : null;
+}
+
+/** Keyboard movement in the message list: ↑ ↓ Home End → the index to focus, or null. `cur` -1: the list itself. */
+export function moveIndex(key: string, cur: number, n: number): number | null {
+  if (!n) return null;
+  if (key === 'Home') return 0;
+  if (key === 'End') return n - 1;
+  if (key === 'ArrowUp') return cur < 0 ? n - 1 : Math.max(0, cur - 1);
+  if (key === 'ArrowDown') return cur < 0 ? n - 1 : Math.min(n - 1, cur + 1);
+  return null;
+}

@@ -1,6 +1,6 @@
 {
   "name": "@runmu.sh/ext-channels",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "The Channels panel: the game's chat channels as a rail of chips with unread and mention markers, one channel's messages with search, colours and alerts, a composer, and a pop-out per channel, from GMCP Comm.Channel.*.",
   "keywords": [
     "channels",
@@ -22,6 +22,8 @@
   "exports": "./dist/index.js",
   "files": [
     "dist",
+    "schema",
+    "src/types.ts",
     "README.md",
     "CHANGELOG.md"
   ],
@@ -33,8 +35,8 @@
     "test": "node --experimental-strip-types --test \"tests/*.test.mjs\""
   },
   "devDependencies": {
-    "@muclient/sdk": "npm:@runmu.sh/sdk@^1.7.1",
-    "@runmu.sh/dev": "^0.1.0",
+    "@muclient/sdk": "npm:@runmu.sh/sdk@^1.12.0",
+    "@runmu.sh/dev": "^0.2.0",
     "esbuild": "^0.28.2",
     "typescript": "^5.9.0",
     "vue": "^3.5.0"
@@ -44,7 +46,7 @@
   },
   "muclient": {
     "id": "channels",
-    "api": "^1.7",
+    "api": "^1.12",
     "source": "src/index.ts",
     "displayName": "Channels",
     "description": "The Channels panel: the game's chat channels as a rail of chips with unread and mention markers, one channel's messages with search, colours and alerts, a composer, and a pop-out per channel, from GMCP Comm.Channel.*.",
@@ -69,7 +71,35 @@
         }
       ],
       "gmcp": [
-        "Comm.Channel 1"
+        {
+          "package": "Comm.Channel 1",
+          "messages": {
+            "Comm.Channel.List": {
+              "dir": "in",
+              "schema": "schema/list.json"
+            },
+            "Comm.Channel.Text": {
+              "dir": "in",
+              "schema": "schema/text.json"
+            },
+            "Comm.Channel.Players": {
+              "dir": "in",
+              "schema": "schema/players.json"
+            }
+          }
+        }
+      ],
+      "contextMenus": [
+        {
+          "id": "reply",
+          "target": "channel-message",
+          "title": "Reply to <sender>"
+        },
+        {
+          "id": "copy",
+          "target": "channel-message",
+          "title": "Copy message"
+        }
       ]
     },
     "capabilities": [

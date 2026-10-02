@@ -8,13 +8,16 @@
  * `params.channel` it is a popped-out view of that one channel: no switching, its own composer, it marks its
  * channel read, and it survives a layout reload.
  */
-import { computed, defineComponent, h, nextTick, ref, shallowRef, watch, type PropType, type VNode } from 'vue';
-import { CHANNEL_COLORS, type ChannelColor, type ChannelView, type ChannelsView, type Mu } from '@muclient/sdk';
+import { computed, defineComponent, h, nextTick, onBeforeUnmount, ref, shallowRef, watch, type PropType, type VNode } from 'vue';
+import { CHANNEL_COLORS, type ChannelColor, type ChannelMessage, type ChannelView, type ChannelsView, type Dispose, type Mu } from '@muclient/sdk';
 import { COPY } from './copy.ts';
 import {
-  activeHitId, activeKeyOf, activeOf, bodyOf, clampHit, countText, hhmm, isFindKey, messagesOf, popOutArgs, railOf,
-  readAction, searchKey, searchMessages, soloOf, stepIndex, swatchStyle, tintStyle,
+  activeHitId, activeKeyOf, activeOf, atBottom, bodyOf, clampHit, countText, firstUnreadId, groupedIds, hhmm, isFindKey, messagesOf,
+  moveIndex, newerThan, popOutArgs, railOf, readAction, replyText, searchKey, searchMessages, soloOf, stepIndex, swatchStyle, tintStyle,
 } from './logic.ts';
+
+/** "Reply to X" from the message menu (index.ts) reaches every mounted view: (sid, channel key, sender). */
+export type ReplyBus = Set<(sid: string, key: string, sender: string) => void>;
 
 type Alert = 'all' | 'mentions' | 'none';
 const cls = (...xs: Array<string | false | null | undefined>) => xs.filter(Boolean).join(' ');
@@ -35,7 +38,7 @@ export function restoreDraft(el: HTMLElement, state: unknown): void {
   input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-export function createChannelsPanel(mu: Mu) {
+export function createChannelsPanel(mu: Mu, replies: ReplyBus = new Set()) {
   const c = mu.ui.css;
   return defineComponent({
     name: 'ChannelsPanel',
@@ -59,9 +62,11 @@ export function createChannelsPanel(mu: Mu) {
       const active = computed(() => activeOf(st.value, solo.value));
       const rail = computed(() => railOf(st.value, solo.value));
       const msgs = computed(() => messagesOf(st.value, solo.value));
+      const grouped = computed(() => groupedIds(msgs.value));
       const showCfg = ref(false);
       const draft = ref('');
       const view = ref<HTMLElement | null>(null);
+      const composer = ref<HTMLInputElement | null>(null);
 
       const muted = computed(() => !!active.value?.muted);
       const alert = computed<Alert>(() => active.value?.alert ?? 'mentions');
@@ -69,6 +74,31 @@ export function createChannelsPanel(mu: Mu) {
       const configure = (patch: { muted?: boolean; alert?: Alert; color?: ChannelColor | null }) => {
         if (props.sid && active.value) mu.channels.configure(active.value.key, patch, props.sid);
       };
+
+      // ── the "new" divider: before the first message that was unread when the channel was opened ──
+      // Captured from the channel's unread count as it is shown (before reading clears it); dropped on a switch.
+      const dividerAt = ref<number | null>(null);
+      /** A chip click selects (which clears the unread): what was unread is noted first. */
+      let noted: { key: string; id: number | null } | null = null;
+      let shownKey = '';
+
+      // ── scroll: follow the bottom; scrolled up, count what arrives and offer the latest ──
+      const stuck = ref(true);
+      const seenId = ref<number | null>(null);
+      const pending = computed(() => (stuck.value ? 0 : newerThan(msgs.value, seenId.value)));
+      function onScroll() {
+        const el = view.value;
+        if (!el) return;
+        const was = stuck.value;
+        stuck.value = atBottom(el);
+        if (stuck.value) seenId.value = null;
+        else if (was) seenId.value = msgs.value[msgs.value.length - 1]?.id ?? null;
+      }
+      function toBottom() {
+        const el = view.value;
+        if (el) el.scrollTop = el.scrollHeight;
+        stuck.value = true; seenId.value = null;
+      }
 
       // ── search (the terminal's rules and look: hit rows tinted, the active one outlined, n/N, ↑ ↓, Esc) ──
       const searching = ref(false);
@@ -105,7 +135,55 @@ export function createChannelsPanel(mu: Mu) {
         if (isFindKey(e) && st.value?.known) { openSearch(); e.preventDefault(); e.stopPropagation(); }
       }
 
-      function pick(key: string) { if (props.sid && !solo.value) mu.channels.select(key, props.sid); }
+      // ── keyboard in the list: ↑ ↓ Home End move between messages (one tab stop: the focused row) ──
+      const focusIdx = ref(-1);
+      watch(activeKey, () => { focusIdx.value = -1; });
+      function focusRow(i: number) {
+        focusIdx.value = i;
+        void nextTick(() => view.value?.querySelectorAll<HTMLElement>('.msg')[i]?.focus());
+      }
+      function onListKey(e: KeyboardEvent) {
+        if (e.altKey || e.ctrlKey || e.metaKey) return;
+        const rows = msgs.value.length;
+        const cur = e.target === view.value ? -1 : focusIdx.value;
+        const to = moveIndex(e.key, cur, rows);
+        if (to !== null) { focusRow(to); e.preventDefault(); return; }
+        if (e.key === 'Escape' && replyTo.value) { cancelReply(); e.preventDefault(); }
+      }
+
+      // ── reply: "Reply to X", the text goes out as `@X: text` ──
+      const replyTo = ref('');
+      function startReply(sender: string) {
+        if (!sender) return;
+        replyTo.value = sender;
+        void nextTick(() => composer.value?.focus());
+      }
+      function cancelReply() { replyTo.value = ''; composer.value?.focus(); }
+      const onReply = (sid: string, key: string, sender: string) => { if (sid === props.sid && key === activeKey.value) startReply(sender); };
+      replies.add(onReply);
+      onBeforeUnmount(() => { replies.delete(onReply); });
+
+      // ── the message context menu: each row is a `channel-message` target (core and extension entries) ──
+      const rowTargets = new Map<number, { el: HTMLElement; off: Dispose }>();
+      function markRow(el: Element | null, m: ChannelMessage) {
+        if (!(el instanceof HTMLElement) || !props.sid || typeof mu.menus?.target !== 'function') return;
+        const had = rowTargets.get(m.id);
+        if (had?.el === el) return;
+        had?.off();
+        rowTargets.set(m.id, { el, off: mu.menus.target(el, { kind: 'channel-message', sid: props.sid, key: activeKey.value, message: m }) });
+      }
+      watch(() => msgs.value.map((m) => m.id).join(','), () => {
+        const live = new Set(msgs.value.map((m) => m.id));
+        for (const [id, r] of rowTargets) if (!live.has(id) || !r.el.isConnected) { r.off(); rowTargets.delete(id); }
+      }, { flush: 'post' });
+      onBeforeUnmount(() => { for (const r of rowTargets.values()) r.off(); rowTargets.clear(); });
+
+      function pick(key: string) {
+        if (!props.sid || solo.value) return;
+        const ch = st.value?.channels.find((x) => x.key === key);
+        if (key !== activeKey.value) noted = { key, id: ch ? firstUnreadId(st.value?.messages[key] ?? [], ch.unread) : null };
+        mu.channels.select(key, props.sid);
+      }
       function cfgFor(key: string) { pick(key); showCfg.value = true; }
       function popOut() {
         const ch = active.value;
@@ -115,37 +193,49 @@ export function createChannelsPanel(mu: Mu) {
       async function send(e: Event) {
         e.preventDefault();
         if (!props.sid || !draft.value.trim()) return;
-        const t = draft.value;
+        const t = replyText(replyTo.value, draft.value);
         draft.value = '';
+        replyTo.value = '';
         await mu.channels.send(t, activeKey.value, props.sid);
       }
       // Keyed on the last message id, not the count: the host caps a channel's history (500), so the length
       // stops changing once it is full while new messages keep arriving.
       watch([() => msgs.value[msgs.value.length - 1]?.id, activeKey, () => active.value?.unread], async () => {
+        // A channel coming up: the divider goes before what was unread then (it stays while the channel is shown;
+        // what arrives while it is shown is read at once). The reply and the scroll state start over.
+        const a = active.value;
+        if (a && a.key !== shownKey) {
+          shownKey = a.key;
+          dividerAt.value = noted?.key === a.key ? noted.id : firstUnreadId(msgs.value, a.unread);
+          noted = null;
+          replyTo.value = ''; stuck.value = true; seenId.value = null;
+        }
         // Reading a channel clears its unread count (the popped-out view reads its own channel).
         const r = props.sid ? readAction(st.value, solo.value) : null;
         if (r && props.sid) { if (r.op === 'markRead') mu.channels.markRead(r.key, props.sid); else mu.channels.select(r.key, props.sid); }
         await nextTick();
-        if (view.value && activeHit.value < 0) view.value.scrollTop = view.value.scrollHeight;
+        if (view.value && activeHit.value < 0 && stuck.value) view.value.scrollTop = view.value.scrollHeight;
       }, { immediate: true });
 
       const chip = (ch: ChannelView): VNode => h('button', {
         key: ch.key, type: 'button', 'data-key': ch.key,
         class: cls('cc', ch.key === activeKey.value && 'on', ch.muted && 'muted', ch.mention && 'mention', !!ch.color && 'tinted'),
         style: tintStyle(ch.color), 'data-color': ch.color || undefined, 'aria-pressed': String(ch.key === activeKey.value),
+        'aria-current': ch.key === activeKey.value ? 'true' : undefined,
+        'aria-label': COPY.chipLabel(ch.caption, ch.unread, ch.mention, ch.online, ch.muted), title: ch.caption,
         onClick: () => pick(ch.key),
         onContextmenu: (e: MouseEvent) => { e.preventDefault(); cfgFor(ch.key); },
       }, [
         h('span', { class: 'name' }, ch.caption),
         ch.mention ? h('span', { class: 'at', 'aria-hidden': 'true' }, '@') : null,
-        ch.online !== null ? h('span', { class: 'online', title: COPY.online(ch.online) }, String(ch.online)) : null,
-        ch.unread ? h('span', { class: cls('bd', c.count), 'aria-label': COPY.unread(ch.unread) }, String(ch.unread)) : null,
+        ch.online !== null ? h('span', { class: 'online', title: COPY.online(ch.online), 'aria-hidden': 'true' }, String(ch.online)) : null,
+        ch.unread ? h('span', { class: cls('bd', c.count), 'aria-hidden': 'true' }, String(ch.unread)) : null,
       ]);
 
       const tool = (on: boolean, extra: Record<string, unknown>, label: string) =>
         h('button', { type: 'button', class: cls(c.cmd, 't', on && 'on'), ...extra }, label);
 
-      const cfgStrip = () => h('div', { class: 'ccfg', 'data-testid': 'channel-cfg' }, [
+      const cfgStrip = (name: string) => h('div', { class: 'ccfg', 'data-testid': 'channel-cfg' }, [
         h('div', { class: 'cfg-row' }, [
           h('span', COPY.color),
           h('span', { class: 'swatches', role: 'radiogroup', 'aria-label': COPY.color, 'data-testid': 'channel-colors' }, [
@@ -162,7 +252,7 @@ export function createChannelsPanel(mu: Mu) {
         h('label', { class: 'cfg-row' }, [
           h('span', COPY.alerts),
           h('select', {
-            class: cls('sel', c.field), value: alert.value,
+            class: cls('sel', c.field), value: alert.value, 'aria-label': COPY.alertsLabel(name),
             onChange: (e: Event) => configure({ alert: (e.target as HTMLSelectElement).value as Alert }),
           }, [
             h('option', { value: 'all', selected: alert.value === 'all' }, COPY.alertAll),
@@ -186,17 +276,44 @@ export function createChannelsPanel(mu: Mu) {
         h('button', { type: 'button', class: cls(c.cmd, 's-btn'), 'aria-label': COPY.close, 'data-s': 'close', onClick: closeSearch }, COPY.closeLabel),
       ]);
 
-      const messages = (tint: unknown) => h('div', {
-        ref: view, class: 'msgs', role: 'log', 'data-focus-region': 'channels', tabindex: '-1', 'data-testid': 'channel-msgs', style: tintStyle(tint),
-      }, msgs.value.length ? msgs.value.map((m) => h('div', {
-        key: m.id, 'data-mid': m.id, role: 'article',
-        class: cls('msg', m.mention && 'mention', hitSet.value.has(m.id) && 'hit', m.id === activeHit.value && 'active'),
-      }, [
-        h('span', { class: 'mts' }, hhmm(m.ts)),
-        h('span', { class: 'sender' }, m.sender),
-        h('span', { class: 'b text' }, m.text),
-        m.reactions ? h('span', { class: 'reacts' }, Object.entries(m.reactions).map(([r, n]) => h('span', { key: r, class: 'react' }, `${r} ${n}`))) : null,
-      ])) : [h('p', { class: c.empty }, COPY.noMessages)]);
+      const row = (m: ChannelMessage, i: number): VNode[] => {
+        // After the divider a message starts a new group.
+        const g = grouped.value.has(m.id) && !(m.id === dividerAt.value && !searching.value);
+        const time = hhmm(m.ts);
+        const out: VNode[] = [];
+        if (m.id === dividerAt.value && !searching.value) {
+          out.push(h('div', { key: `new-${m.id}`, class: 'divider', role: 'separator', 'aria-label': COPY.newDividerLabel, 'data-testid': 'channel-new' }, [h('span', COPY.newDivider)]));
+        }
+        out.push(h('div', {
+          key: m.id, 'data-mid': m.id, role: 'article', tabindex: i === focusIdx.value ? '0' : '-1',
+          'aria-label': COPY.messageLabel(m.sender, time, m.text),
+          class: cls('msg', g && 'grouped', m.mention && 'mention', hitSet.value.has(m.id) && 'hit', m.id === activeHit.value && 'active'),
+          ref: ((el: unknown) => markRow(el as Element | null, m)) as never,
+          onFocus: () => { focusIdx.value = i; },
+        }, [
+          g ? null : h('span', { class: 'mts' }, time),
+          g ? null : h('span', { class: 'sender' }, m.sender),
+          h('span', { class: 'b text' }, m.text),
+          m.reactions ? h('span', { class: 'reacts' }, Object.entries(m.reactions).map(([r, n]) => h('span', { key: r, class: 'react' }, `${r} ${n}`))) : null,
+          m.sender ? h('span', { class: 'mt' }, [
+            h('button', {
+              type: 'button', class: cls(c.cmd, c.sq, 'mt-btn'), title: COPY.reply, 'aria-label': COPY.replyLabel(m.sender), 'data-testid': 'channel-reply',
+              onClick: (e: MouseEvent) => { e.stopPropagation(); startReply(m.sender); },
+            }, '↩'),
+          ]) : null,
+        ]));
+        return out;
+      };
+
+      const messages = (a: ChannelView) => h('div', { class: 'msgs-wrap' }, [
+        h('div', {
+          ref: view, class: 'msgs', role: 'log', 'data-focus-region': 'channels', tabindex: '-1', 'data-testid': 'channel-msgs', style: tintStyle(a.color),
+          'aria-label': COPY.messagesLabel(a.caption), onScroll, onKeydown: onListKey,
+        }, msgs.value.length ? msgs.value.flatMap(row) : [h('p', { class: c.empty }, COPY.noMessages)]),
+        pending.value > 0 ? h('button', {
+          type: 'button', class: 'latest', 'aria-label': COPY.latestLabel, 'data-testid': 'channel-latest', onClick: () => { toBottom(); view.value?.focus(); },
+        }, `↓ ${COPY.latest(pending.value)}`) : null,
+      ]);
 
       return () => {
         const body = bodyOf(st.value, solo.value);
@@ -214,22 +331,27 @@ export function createChannelsPanel(mu: Mu) {
           else kids.push(h('div', { class: 'cv' }, [
             h('div', { class: 'head' }, [
               h('span', { class: cls('title', c.glow), 'data-testid': 'channel-title' }, a.caption),
-              a.topic ? h('span', { class: 'topic' }, a.topic) : null,
+              a.topic ? h('span', { class: 'topic', title: a.topic }, a.topic) : null,
               h('span', { class: 'tools' }, [
-                tool(showCfg.value, { title: COPY.settingsTitle, 'aria-expanded': String(showCfg.value), 'data-testid': 'channel-cfg-btn', onClick: () => { showCfg.value = !showCfg.value; } }, COPY.settings),
-                tool(searching.value, { title: COPY.searchTitle, 'aria-expanded': String(searching.value), 'data-testid': 'channel-search-btn', onClick: toggleSearch }, COPY.search),
-                tool(muted.value, { title: COPY.muteTitle, 'aria-pressed': String(muted.value), 'data-testid': 'channel-mute', onClick: () => configure({ muted: !muted.value }) }, muted.value ? COPY.unmute : COPY.mute),
-                solo.value ? null : tool(false, { title: COPY.popOutTitle(a.caption), 'data-testid': 'channel-popout', onClick: popOut }, COPY.popOut),
+                tool(showCfg.value, { title: COPY.settingsTitle, 'aria-label': COPY.settingsLabel(a.caption), 'aria-expanded': String(showCfg.value), 'data-testid': 'channel-cfg-btn', onClick: () => { showCfg.value = !showCfg.value; } }, COPY.settings),
+                tool(searching.value, { title: COPY.searchTitle, 'aria-label': COPY.searchLabel(a.caption), 'aria-expanded': String(searching.value), 'data-testid': 'channel-search-btn', onClick: toggleSearch }, COPY.search),
+                tool(muted.value, { title: COPY.muteTitle, 'aria-pressed': String(muted.value), 'data-testid': 'channel-mute', onClick: () => configure({ muted: !muted.value }) }, muted.value ? COPY.muted : COPY.mute),
+                solo.value ? null : tool(false, { title: COPY.popOutTitle(a.caption), 'aria-label': COPY.popOutTitle(a.caption), 'data-testid': 'channel-popout', onClick: popOut }, COPY.popOut),
               ]),
             ]),
-            showCfg.value ? cfgStrip() : null,
+            showCfg.value ? cfgStrip(a.caption) : null,
             searching.value ? searchStrip() : null,
-            messages(a.color),
+            messages(a),
+            replyTo.value ? h('div', { class: 'replybar', 'data-testid': 'channel-replybar' }, [
+              h('span', [`${COPY.replyingTo} `, h('b', replyTo.value)]),
+              h('button', { type: 'button', class: cls(c.cmd, 'rb-cancel'), 'aria-label': COPY.cancelReply, onClick: cancelReply }, COPY.cancel),
+            ]) : null,
             h('form', { class: 'composer', onSubmit: send }, [
               h('span', { class: cls('chev', c.glow), 'aria-hidden': 'true' }, '❯'),
               h('input', {
-                value: draft.value, class: cls('in', c.field), autocomplete: 'off', placeholder: COPY.placeholder(a.caption), 'aria-label': COPY.placeholder(a.caption),
+                ref: composer, value: draft.value, class: cls('in', c.field), autocomplete: 'off', placeholder: COPY.placeholder(a.caption), 'aria-label': COPY.placeholder(a.caption),
                 'data-testid': 'channel-input', onInput: (e: Event) => { draft.value = (e.target as HTMLInputElement).value; },
+                onKeydown: (e: KeyboardEvent) => { if (e.key === 'Escape' && replyTo.value) { replyTo.value = ''; e.preventDefault(); e.stopPropagation(); } },
               }),
             ]),
           ]));

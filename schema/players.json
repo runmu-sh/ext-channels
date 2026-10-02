@@ -1,0 +1,4 @@
+{
+  "$comment": "Comm.Channel.Players: online counts per channel, in any of the common shapes (a map of channel to names or a count, { channel, players }, or a list of either).",
+  "type": ["object", "array"]
+}

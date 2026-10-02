@@ -1,0 +1,13 @@
+{
+  "$comment": "Comm.Channel.Text: one message. The speaker is talker, else sender, else from. Extra fields are allowed.",
+  "type": "object",
+  "required": ["channel", "text"],
+  "properties": {
+    "channel": { "type": "string" },
+    "talker": { "type": "string" },
+    "sender": { "type": "string" },
+    "from": { "type": "string" },
+    "text": { "type": "string" },
+    "reactions": { "type": "object", "additionalProperties": { "type": "number" } }
+  }
+}

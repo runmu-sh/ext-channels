@@ -8,8 +8,12 @@ export const COPY = {
   placeholder: (ch: string) => `message ${ch}`,
   settings: 'Settings',
   settingsTitle: 'channel settings',
+  /** The Mute tool while the channel is muted (a pressed toggle, as Underspire's). */
   muted: 'Muted',
-  mute: 'Mute', unmute: 'Unmute', muteTitle: 'mute channel',
+  mute: 'Mute',
+  /** @deprecated since 1.1.0 the pressed tool reads {@link COPY.muted}; kept for callers of the 1.0 export. */
+  unmute: 'Unmute',
+  muteTitle: 'mute channel',
   alerts: 'Alerts',
   alertAll: 'Every message',
   alertMentions: 'Mentions only',
@@ -31,4 +35,26 @@ export const COPY = {
   popOutTitle: (ch: string) => `pop out ${ch}`,
   soloTitle: (ch: string) => `Channel · ${ch}`,
   gone: (ch: string) => `channel ${ch} is not open here`,
+  // ── 1.1.0 ──
+  /** A chip's accessible name: "vox, 3 unread, mentioned, 4 online, muted". */
+  chipLabel: (name: string, unread: number, mention: boolean, online: number | null, muted: boolean) =>
+    [name, unread ? `${unread} unread` : '', mention ? 'mentioned' : '', online !== null ? `${online} online` : '', muted ? 'muted' : ''].filter(Boolean).join(', '),
+  settingsLabel: (ch: string) => `${ch} channel settings`,
+  searchLabel: (ch: string) => `search ${ch}`,
+  alertsLabel: (ch: string) => `${ch} alerts`,
+  messagesLabel: (ch: string) => `${ch} messages`,
+  /** A message's accessible name: "Orrin, 04:12: the bells". */
+  messageLabel: (sender: string, time: string, text: string) => (sender ? `${sender}, ${time}: ${text}` : `${time}: ${text}`),
+  newDivider: 'new',
+  newDividerLabel: 'new messages',
+  /** The jump-to-latest button while scrolled up. */
+  latest: (n: number) => `${n} new message${n === 1 ? '' : 's'}`,
+  latestLabel: 'jump to the latest message',
+  reply: 'Reply',
+  replyLabel: (sender: string) => `reply to ${sender}`,
+  replyingTo: 'Reply to',
+  cancel: 'Cancel',
+  cancelReply: 'cancel the reply',
+  menuReply: (sender: string) => `Reply to ${sender}`,
+  menuCopy: 'Copy message',
 };

@@ -13,24 +13,22 @@ const render = async (mu, props) => {
   return renderToString(createSSRApp({ render: () => h(Panel, props) }));
 };
 
-test('setup registers both panels, the stylesheet and the auto-add', () => {
+test('setup registers both panels (channels always offered), the stylesheet and the message menu', () => {
   const mu = fakeMu();
   setup(mu);
   const [a, b] = mu.registered;
-  assert.deepEqual({ id: a.id, title: a.title, singleton: a.singleton, pos: a.defaultPosition, order: a.order }, { id: 'channels', title: 'Channels', singleton: true, pos: 'right-bottom', order: 20 });
+  assert.deepEqual({ id: a.id, title: a.title, singleton: a.singleton, pos: a.defaultPosition, order: a.order, show: a.show }, { id: 'channels', title: 'Channels', singleton: true, pos: 'right-bottom', order: 20, show: undefined });
   assert.deepEqual({ id: b.id, singleton: b.singleton, pos: b.defaultPosition, views: b.inViewsMenu, order: b.order }, { id: 'channel', singleton: false, pos: 'right-bottom', views: false, order: 21 });
   assert.equal(mu.styles.length, 1);
-  assert.equal(mu.handlers.length, 1);
-  assert.equal(mu.handlers[0][0], 'Comm.Channel');
-  mu.handlers[0][1]({}, { sid: 's-1', pkg: 'Comm.Channel.List' });
-  assert.deepEqual(mu.calls, [['panels.autoAdd', 'channels', 's-1']]);
+  assert.equal(mu.handlers.length, 0, 'no GMCP handler of its own: the host adapter reads Comm.Channel');
+  assert.deepEqual(mu.menus.contexts.map((c) => [c.id, c.target]), [['reply', 'channel-message'], ['copy', 'channel-message']]);
 });
 
-test('the stylesheet: one root, tokens only, sized from --shell-font-size', () => {
-  const rules = CHANNELS_CSS.split('\n').map((l) => l.trim()).filter(Boolean);
+test('the stylesheet: scoped to the panel box, tokens only, sized from --shell-font-size', () => {
+  const rules = CHANNELS_CSS.split('\n').map((l) => l.trim()).filter(Boolean).map((r) => r.replace(/^@media[^{]*\{\s*/, ''));
   for (const r of rules) {
     const sel = r.slice(0, r.indexOf('{'));
-    for (const s of sel.split(',')) assert.match(s.trim(), /^\.mu-channels\b/, `scoped: ${s}`);
+    for (const s of sel.split(',')) assert.match(s.trim(), /^\.ext-panel\[data-ext="channels"\] \.mu-channels\b/, `scoped: ${s}`);
   }
   assert.doesNotMatch(CHANNELS_CSS, /#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i, 'no free colours');
   assert.match(CHANNELS_CSS, /\.mu-channels \{ --u: var\(--shell-font-size, 15px\);[^}]*font-size: var\(--u\)/);
@@ -52,12 +50,13 @@ test('the full panel: rail markers, tint, messages, reactions, composer; reading
   const mu = fakeMu(v);
   const html = await render(mu, { sid: 's-1', worldId: 'w', params: {} });
   for (const id of ['channel-rail', 'channel-title', 'channel-cfg-btn', 'channel-search-btn', 'channel-mute', 'channel-popout', 'channel-msgs', 'channel-input']) assert.match(html, new RegExp(`data-testid="${id}"`), id);
-  assert.match(html, /data-key="vox" class="cc on tinted" style="--chan:var\(--ok\);" data-color="ok" aria-pressed="true"/);
+  assert.match(html, /data-key="vox" class="cc on tinted" style="--chan:var\(--ok\);" data-color="ok" aria-pressed="true" aria-current="true"/);
   assert.match(html, /data-key="ooc" class="cc muted mention"/);
   assert.match(html, /<span class="at" aria-hidden="true">@<\/span>/);
-  assert.match(html, /<span class="online" title="4 online">4<\/span>/);
-  assert.match(html, /<span class="bd sh-count" aria-label="3 unread">3<\/span>/);
-  assert.match(html, /class="topic">the city</);
+  assert.match(html, /<span class="online" title="4 online" aria-hidden="true">4<\/span>/);
+  assert.match(html, /<span class="bd sh-count" aria-hidden="true">3<\/span>/);
+  assert.match(html, /aria-label="ooc, 3 unread, mentioned, muted"/, 'the chip names its state');
+  assert.match(html, /class="topic" title="the city">the city</);
   assert.match(html, /class="msgs"[^>]*data-focus-region="channels"[^>]*style="--chan:var\(--ok\);"/);
   assert.match(html, /data-mid="1"[^>]*class="msg mention"/);
   assert.match(html, /hello &lt;b&gt;/, 'text is escaped');
@@ -93,13 +92,23 @@ test('known, nothing selected: No channel.', async () => {
 
 // The panel's reactive behaviour, without a DOM: run its setup in an effect scope with reactive props, the
 // way the host would drive it, and let Vue's scheduler flush the watchers.
+/** Depth-first: the first vnode under `n` that `pred` accepts, or null. */
+const find = (n, pred) => {
+  if (!n || typeof n !== 'object') return null;
+  if (Array.isArray(n)) { for (const c of n) { const f = find(c, pred); if (f) return f; } return null; }
+  if (pred(n)) return n;
+  return find(n.children, pred);
+};
+const text = (n) => (typeof n === 'string' ? n : Array.isArray(n) ? n.map(text).join('') : n && typeof n === 'object' ? text(n.children ?? '') : '');
+/** A vnode's template ref (`ref: someRef`) set by hand, the way a mount would. */
+const setRef = (n, el) => { const r = n.ref; if (r && typeof r === 'object' && 'r' in r) { if (typeof r.r === 'object') r.r.value = el; } };
 const live = (mu, props) => {
   setup(mu);
   const Panel = mu.registered[0].mount.component;
   const p = shallowReactive({ worldId: 'w', params: {}, ...props });
   const scope = effectScope();
-  scope.run(() => Panel.setup(p, { attrs: {}, slots: {}, emit() {}, expose() {} }));
-  return { p, stop: () => scope.stop() };
+  const render = scope.run(() => Panel.setup(p, { attrs: {}, slots: {}, emit() {}, expose() {} }));
+  return { p, stop: () => scope.stop(), tree: () => scope.run(render) };
 };
 
 test('a sid change drops the old subscription and watches the new session', async () => {
@@ -136,15 +145,18 @@ test('unread clears on a new message when the history is already at the 500 cap'
   stop();
 });
 
-test('autoAdd runs once per session', () => {
-  const mu = fakeMu();
+test('per session: touch once when the channels are known, the badge follows the unread total', () => {
+  const mu = fakeMu(view({ known: false, channels: [] }), { sessions: ['s-1'] });
   setup(mu);
-  const on = mu.handlers[0][1];
-  on({}, { sid: 's-1', pkg: 'Comm.Channel.List' });
-  on({}, { sid: 's-1', pkg: 'Comm.Channel.Text' });
-  on({}, { sid: 's-2', pkg: 'Comm.Channel.Text' });
-  on({}, { sid: 's-1', pkg: 'Comm.Channel.Text' });
-  assert.deepEqual(mu.calls, [['panels.autoAdd', 'channels', 's-1'], ['panels.autoAdd', 'channels', 's-2']]);
+  assert.deepEqual(mu.calls, [], 'not known yet: nothing');
+  mu.set(view({ channels: [chan('vox', { unread: 2 }), chan('ooc', { unread: 1 }), chan('trade', { unread: 5, muted: true })] }));
+  mu.set(view({ channels: [chan('vox', { unread: 2 }), chan('ooc', { unread: 1 })] }));
+  mu.set(view({ channels: [chan('vox'), chan('ooc')] }));
+  assert.deepEqual(mu.calls, [
+    ['panels.touch', 'channels', 's-1'],
+    ['panels.badge', 'channels', { count: 3 }, 's-1'],
+    ['panels.badge', 'channels', null, 's-1'],
+  ], 'muted channels do not count; the same total is not set twice');
 });
 
 test('the channels panel snapshots and restores the composer draft', () => {
@@ -162,4 +174,104 @@ test('the channels panel snapshots and restores the composer draft', () => {
   assert.equal(input.value, 'half a sentence');
   assert.deepEqual(input.events, ['input']);
   spec.restore({ querySelector: () => null }, 'x');
+});
+
+test('grouped messages drop the time and sender; the divider marks what was unread; rows are message targets', async () => {
+  const t = (m) => Date.UTC(2026, 9, 1, 4, m);
+  const v = view({
+    channels: [chan('vox', { unread: 3 }), chan('ooc')],
+    messages: { vox: [msg(1, 'Orrin', 'one', { ts: t(0) }), msg(2, 'Orrin', 'two', { ts: t(1) }), msg(3, 'Quill', 'three', { ts: t(2) }), msg(4, 'Quill', 'four', { ts: t(3) })] },
+  });
+  const mu = fakeMu(v);
+  const html = await render(mu, { sid: 's-1', worldId: 'w', params: {} });
+  assert.match(html, /data-mid="4"[^>]*class="msg grouped">(<!---->)*<span class="b text">four</, 'grouped: no time, no sender');
+  assert.match(html, /data-mid="2"[^>]*class="msg"><span class="mts">/, 'after the divider a new group starts');
+  assert.match(html, /data-mid="1"[^>]*class="msg"><span class="mts">/);
+  assert.match(html, /data-testid="channel-new"><span>new<\/span><\/div><div data-mid="2"/, 'divider before the first unread');
+  assert.match(html, /aria-label="Orrin, 04:01: two"/, 'the label always names the sender and time');
+  assert.match(html, /aria-label="vox messages"/);
+  assert.equal((html.match(/data-testid="channel-reply"/g) ?? []).length, 4, 'a reply tool per message with a sender');
+});
+
+test('the Mute tool reads Muted while pressed', async () => {
+  const html = await render(fakeMu(view({ channels: [chan('vox', { muted: true })] })), { sid: 's-1', worldId: 'w', params: {} });
+  assert.match(html, /aria-pressed="true" data-testid="channel-mute">Muted</);
+});
+
+test('reply from the message menu: the bar shows, the composer sends @sender: text, the bar goes', async () => {
+  const mu = fakeMu(view({ messages: { vox: [msg(1, 'Orrin', 'anyone?')] } }));
+  const { stop, tree } = live(mu, { sid: 's-1' });
+  await nextTick();
+  const reply = mu.menus.contexts.find((c) => c.id === 'reply');
+  const target = { kind: 'channel-message', sid: 's-1', key: 'vox', message: msg(1, 'Orrin', 'anyone?') };
+  assert.equal(reply.title(target), 'Reply to Orrin');
+  assert.equal(reply.when(target), true);
+  assert.equal(reply.when({ ...target, message: msg(2, '', 'system') }), false, 'nobody to reply to');
+  reply.run(target);
+  await nextTick();
+  const bar = find(tree(), (n) => n.props?.['data-testid'] === 'channel-replybar');
+  assert.ok(bar, 'the reply bar shows');
+  assert.match(text(bar), /^Reply to Orrin/);
+  const input = find(tree(), (n) => n.props?.['data-testid'] === 'channel-input');
+  input.props.onInput({ target: { value: 'on my way' } });
+  const form = find(tree(), (n) => n.type === 'form');
+  await form.props.onSubmit({ preventDefault() {} });
+  assert.deepEqual(mu.calls.filter((c) => c[0] === 'send').at(-1), ['send', '@Orrin: on my way', 'vox', 's-1']);
+  await nextTick();
+  assert.equal(find(tree(), (n) => n.props?.['data-testid'] === 'channel-replybar'), null, 'the bar goes after sending');
+  // Another session's reply does not reach this view.
+  reply.run({ ...target, sid: 's-2' });
+  await nextTick();
+  assert.equal(find(tree(), (n) => n.props?.['data-testid'] === 'channel-replybar'), null);
+  // The hover tool starts one too; Cancel drops it.
+  find(tree(), (n) => n.props?.['data-testid'] === 'channel-reply').props.onClick({ stopPropagation() {} });
+  await nextTick();
+  const cancel = find(find(tree(), (n) => n.props?.['data-testid'] === 'channel-replybar'), (n) => n.type === 'button');
+  cancel.props.onClick();
+  await nextTick();
+  assert.equal(find(tree(), (n) => n.props?.['data-testid'] === 'channel-replybar'), null);
+  stop();
+});
+
+test('scrolled up: new messages count on the latest button; clicking it goes back down', async () => {
+  const mu = fakeMu(view({ messages: { vox: [msg(1, 'Orrin', 'a'), msg(2, 'Orrin', 'b')] } }));
+  const { stop, tree } = live(mu, { sid: 's-1' });
+  await nextTick();
+  const list = find(tree(), (n) => n.props?.['data-testid'] === 'channel-msgs');
+  const el = { scrollTop: 0, scrollHeight: 600, clientHeight: 100, focus() {} };
+  // Point the panel's list ref at the fake element, then scroll it up.
+  setRef(list, el);
+  list.props.onScroll();
+  mu.set(view({ messages: { vox: [msg(1, 'Orrin', 'a'), msg(2, 'Orrin', 'b'), msg(3, 'Quill', 'c'), msg(4, 'Quill', 'd')] } }));
+  await nextTick();
+  const latest = find(tree(), (n) => n.props?.['data-testid'] === 'channel-latest');
+  assert.ok(latest, 'the latest button shows');
+  assert.equal(text(latest), '↓ 2 new messages');
+  latest.props.onClick();
+  await nextTick();
+  assert.equal(el.scrollTop, 600);
+  assert.equal(find(tree(), (n) => n.props?.['data-testid'] === 'channel-latest'), null);
+  stop();
+});
+
+test('↑ ↓ Home End in the list move the roving focus', async () => {
+  const mu = fakeMu(view({ messages: { vox: [msg(1, 'Orrin', 'a'), msg(2, 'Orrin', 'b'), msg(3, 'Quill', 'c')] } }));
+  const { stop, tree } = live(mu, { sid: 's-1' });
+  await nextTick();
+  const tab = () => find(tree(), (n) => n.props?.['data-testid'] === 'channel-msgs').children.filter((c) => c.props?.['data-mid']).map((c) => c.props.tabindex);
+  assert.deepEqual(tab(), ['-1', '-1', '-1']);
+  const list = find(tree(), (n) => n.props?.['data-testid'] === 'channel-msgs');
+  const key = (k, target = null) => { let d = false; list.props.onKeydown({ key: k, target, preventDefault() { d = true; } }); return d; };
+  assert.equal(key('ArrowUp'), true);
+  await nextTick();
+  assert.deepEqual(tab(), ['-1', '-1', '0'], 'from the list: the newest');
+  const row = {};
+  key('ArrowUp', row); await nextTick();
+  assert.deepEqual(tab(), ['-1', '0', '-1']);
+  key('Home', row); await nextTick();
+  assert.deepEqual(tab(), ['0', '-1', '-1']);
+  key('End', row); await nextTick();
+  assert.deepEqual(tab(), ['-1', '-1', '0']);
+  assert.equal(key('a'), false, 'other keys pass');
+  stop();
 });
