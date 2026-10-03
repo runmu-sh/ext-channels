@@ -57,4 +57,14 @@ export const COPY = {
   cancelReply: 'cancel the reply',
   menuReply: (sender: string) => `Reply to ${sender}`,
   menuCopy: 'Copy message',
+  // ── 1.2.0: settings, context kinds, the focus command ──
+  cfgLabel: 'Channel settings',
+  cfgHint: 'Mute, alerts and colour per channel, for this world. Set them from the panel.',
+  replyFormat: 'Reply format',
+  replyFormatHint: '{channel} and {text} are replaced',
+  alertsSetting: 'Channel alerts',
+  alertsSettingHint: 'A channel message that alerts (by its channel setting) raises a mention: badge, toast, sound and desktop notification per Settings → Alerts.',
+  kindMessage: 'Channel message',
+  kindChannel: 'Channel',
+  focusCommand: 'Go to channels',
 };

@@ -1,9 +1,93 @@
 /**
  * The pure parts of the Channels panel, exported for tests: the search matcher (the terminal's rules), the
- * colour and tint helpers, the rail selection and the unread clearing. Nothing here touches the DOM or Vue.
+ * colour and tint helpers, the per-channel settings, the rail selection and the unread clearing. Nothing here
+ * touches the DOM or Vue.
  */
-import { CHANNEL_COLORS, type ChannelColor, type ChannelMessage, type ChannelView, type ChannelsView } from '@muclient/sdk';
+import { CHANNEL_COLORS, type ChannelColor, type ChannelMessage, type ChannelMessageEvent, type ChannelsView } from '@muclient/sdk';
 import { COPY } from './copy.ts';
+
+// ── 1.2.0: the per-channel settings are this extension's own `config` setting ──
+
+export type Alert = 'all' | 'mentions' | 'none';
+export const ALERTS: readonly Alert[] = ['all', 'mentions', 'none'];
+/** One channel's settings, as the `config` setting stores them (the shape of the core pref `channels.config` it migrates from). */
+export interface ChanCfg { muted?: boolean; alert?: Alert; color?: ChannelColor }
+/** Channel key → its settings, for one world. */
+export type ChanConfig = Record<string, ChanCfg>;
+
+/** A channel as the panel shows it: the host's channel with mute, alert and colour from the extension's `config`. */
+export interface ChannelRow {
+  key: string; name: string; caption: string; command: string; online: number | null; unread: number; mention: boolean; topic?: string;
+  muted: boolean; alert: Alert; color: ChannelColor | null;
+  /** The host's unread count, muted or not: reading the channel clears it. */
+  hostUnread: number;
+}
+/** A session's channels with {@link ChannelRow}s. */
+export interface ShownView { known: boolean; active: string; channels: ChannelRow[]; messages: ChannelsView['messages'] }
+
+/** The stored `config` value, cleaned: unknown keys, alerts and colours are dropped. */
+export function normConfig(raw: unknown): ChanConfig {
+  const out: ChanConfig = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!v || typeof v !== 'object') continue;
+    const c = v as Record<string, unknown>;
+    const e: ChanCfg = {};
+    if (c.muted === true) e.muted = true;
+    if ((ALERTS as readonly unknown[]).includes(c.alert)) e.alert = c.alert as Alert;
+    if (isChannelColor(c.color)) e.color = c.color;
+    if (Object.keys(e).length) out[k] = e;
+  }
+  return out;
+}
+
+/** `config` with `patch` applied to channel `key`. `color: null` and `muted: false` remove the field; an empty entry is removed. */
+export function patchConfig(config: ChanConfig, key: string, patch: { muted?: boolean; alert?: Alert; color?: ChannelColor | null }): ChanConfig {
+  const all = { ...normConfig(config) };
+  const next: ChanCfg = { ...all[key] };
+  if (patch.muted !== undefined) { if (patch.muted) next.muted = true; else delete next.muted; }
+  if (patch.alert !== undefined && (ALERTS as readonly string[]).includes(patch.alert)) next.alert = patch.alert;
+  if (patch.color !== undefined) { if (isChannelColor(patch.color)) next.color = patch.color; else if (patch.color === null) delete next.color; }
+  if (Object.keys(next).length) all[key] = next; else delete all[key];
+  return all;
+}
+
+/**
+ * The host's channels with the extension's settings. The host counts unread on muted channels too (the extension
+ * owns the settings); a muted channel shows no unread count and no mention.
+ */
+export function withConfig(v: ChannelsView | null, config: ChanConfig): ShownView | null {
+  if (!v) return null;
+  return {
+    known: v.known, active: v.active, messages: v.messages,
+    channels: v.channels.map((c) => {
+      const cfg = config[c.key] ?? {};
+      const muted = !!cfg.muted;
+      return {
+        key: c.key, name: c.name, caption: c.caption, command: c.command, online: c.online, ...(c.topic !== undefined ? { topic: c.topic } : {}),
+        unread: muted ? 0 : c.unread, mention: muted ? false : c.mention, hostUnread: c.unread, muted, alert: cfg.alert ?? 'mentions', color: cfg.color ?? null,
+      };
+    }),
+  };
+}
+
+/**
+ * Whether a stored message raises a channel alert: the `alerts` setting is on, it was not read on another device,
+ * the channel is not muted, and its alert setting is "every message", or "mentions only" (the default) and it
+ * names the character.
+ */
+export function alertFor(e: Pick<ChannelMessageEvent, 'channel' | 'read' | 'message'>, config: ChanConfig, alertsOn: boolean): boolean {
+  if (!alertsOn || e.read) return false;
+  const cfg = config[e.channel] ?? {};
+  if (cfg.muted) return false;
+  const a = cfg.alert ?? 'mentions';
+  return a === 'all' || (a === 'mentions' && !!e.message.mention);
+}
+
+/** What `mu.notify.mention` gets for a message: title "sender · caption", the text, and a key when the game sent a seq (one alert across the player's clients). */
+export function mentionOf(e: ChannelMessageEvent): { sid: string; title: string; body: string; key?: string } {
+  return { sid: e.sid, title: `${e.message.sender} · ${e.caption}`, body: e.message.text, ...(e.seq ? { key: `channel:${e.channel}:${e.seq}` } : {}) };
+}
 
 // ── search: μClient's features/terminal/search.ts makeMatcher, verbatim ──
 
@@ -91,21 +175,21 @@ export const swatchStyle = (c: ChannelColor): Record<string, string> => ({ '--sw
 
 /** The channel a popped-out view names (`params.channel`), or '' for the full panel. */
 export const soloOf = (params: Record<string, unknown> | undefined | null): string => (typeof params?.channel === 'string' ? params.channel : '');
-export const activeKeyOf = (v: ChannelsView | null, solo: string) => solo || v?.active || '';
-export const activeOf = (v: ChannelsView | null, solo: string): ChannelView | null => {
+export const activeKeyOf = (v: ShownView | null, solo: string) => solo || v?.active || '';
+export const activeOf = (v: ShownView | null, solo: string): ChannelRow | null => {
   const k = activeKeyOf(v, solo);
   return v?.channels.find((c) => c.key === k) ?? null;
 };
 /** The chips: every channel, or in a popped-out view only its own. */
-export const railOf = (v: ChannelsView | null, solo: string): ChannelView[] => (!v ? [] : solo ? v.channels.filter((c) => c.key === solo) : v.channels);
-export const messagesOf = (v: ChannelsView | null, solo: string): ChannelMessage[] => {
+export const railOf = (v: ShownView | null, solo: string): ChannelRow[] => (!v ? [] : solo ? v.channels.filter((c) => c.key === solo) : v.channels);
+export const messagesOf = (v: ShownView | null, solo: string): ChannelMessage[] => {
   const a = activeOf(v, solo);
   return v && a ? v.messages[a.key] ?? [] : [];
 };
 
 /** Which body the panel shows. */
 export type Body = 'gone' | 'awaiting' | 'none' | 'view';
-export function bodyOf(v: ChannelsView | null, solo: string): Body {
+export function bodyOf(v: ShownView | null, solo: string): Body {
   if (solo && v?.known && !activeOf(v, solo)) return 'gone';
   if (!v || !v.known) return 'awaiting';
   return activeOf(v, solo) ? 'view' : 'none';
@@ -115,14 +199,14 @@ export function bodyOf(v: ChannelsView | null, solo: string): Body {
  * Reading a channel clears its unread count: the popped-out view marks its own channel read (without
  * selecting it), the full panel selects the active one. Null when nothing is unread.
  */
-export function readAction(v: ChannelsView | null, solo: string): { op: 'markRead' | 'select'; key: string } | null {
+export function readAction(v: ShownView | null, solo: string): { op: 'markRead' | 'select'; key: string } | null {
   const a = activeOf(v, solo);
-  if (!a || !a.unread) return null;
+  if (!a || !a.hostUnread) return null;
   return { op: solo ? 'markRead' : 'select', key: a.key };
 }
 
 /** The options `mu.panels.open` gets to pop a channel out. */
-export const popOutArgs = (ch: Pick<ChannelView, 'key' | 'caption'>, sid: string) =>
+export const popOutArgs = (ch: Pick<ChannelRow, 'key' | 'caption'>, sid: string) =>
   ['channel', { channel: ch.key, instance: ch.key }, { sid, title: COPY.soloTitle(ch.caption) }] as const;
 
 export const hhmm = (ts: number) => { const d = new Date(ts); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
@@ -165,8 +249,8 @@ export const atBottom = (el: { scrollTop: number; scrollHeight: number; clientHe
 /** What the composer sends while replying to `sender`: `@sender: text` (Underspire's reply form). */
 export const replyText = (sender: string, text: string) => (sender ? `@${sender}: ${text}` : text);
 
-/** The Channels tab badge for a session: the unread total of its channels, or null when nothing is unread. */
-export function badgeOf(v: ChannelsView | null): { count: number } | null {
+/** The Channels tab badge for a session: the unread total of its unmuted channels, or null when nothing is unread. */
+export function badgeOf(v: ShownView | null): { count: number } | null {
   const n = (v?.channels ?? []).reduce((s, c) => s + (c.muted ? 0 : c.unread), 0);
   return n > 0 ? { count: n } : null;
 }

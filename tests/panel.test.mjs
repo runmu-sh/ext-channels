@@ -21,7 +21,8 @@ test('setup registers both panels (channels always offered), the stylesheet and 
   assert.deepEqual({ id: b.id, singleton: b.singleton, pos: b.defaultPosition, views: b.inViewsMenu, order: b.order }, { id: 'channel', singleton: false, pos: 'right-bottom', views: false, order: 21 });
   assert.equal(mu.styles.length, 1);
   assert.equal(mu.handlers.length, 0, 'no GMCP handler of its own: the host adapter reads Comm.Channel');
-  assert.deepEqual(mu.menus.contexts.map((c) => [c.id, c.target]), [['reply', 'channel-message'], ['copy', 'channel-message']]);
+  assert.deepEqual(mu.menus.contexts.map((c) => [c.id, c.target]), [['reply', 'channels.message'], ['copy', 'channels.message']]);
+  assert.deepEqual(mu.menus.kinds.map((k) => [k.id, k.title]), [['channels.message', 'Channel message'], ['channels.channel', 'Channel']]);
 });
 
 test('the stylesheet: scoped to the panel box, tokens only, sized from --shell-font-size', () => {
@@ -44,18 +45,19 @@ test('no session: waiting for channels', async () => {
 
 test('the full panel: rail markers, tint, messages, reactions, composer; reading selects', async () => {
   const v = view({
-    channels: [chan('vox', { unread: 1, color: 'ok', online: 4, topic: 'the city' }), chan('ooc', { unread: 3, mention: true, muted: true })],
+    channels: [chan('vox', { unread: 1, online: 4, topic: 'the city' }), chan('ooc', { unread: 3, mention: true })],
     messages: { vox: [msg(1, 'Orrin', 'hello <b>', { reactions: { '+': 2 }, mention: true })] },
   });
-  const mu = fakeMu(v);
+  // Unread and mention arrive on the muted channel too (the host counts them while the extension owns the settings).
+  const mu = fakeMu(v, { settings: { config: { vox: { color: 'ok' }, ooc: { muted: true } } } });
   const html = await render(mu, { sid: 's-1', worldId: 'w', params: {} });
   for (const id of ['channel-rail', 'channel-title', 'channel-cfg-btn', 'channel-search-btn', 'channel-mute', 'channel-popout', 'channel-msgs', 'channel-input']) assert.match(html, new RegExp(`data-testid="${id}"`), id);
   assert.match(html, /data-key="vox" class="cc on tinted" style="--chan:var\(--ok\);" data-color="ok" aria-pressed="true" aria-current="true"/);
-  assert.match(html, /data-key="ooc" class="cc muted mention"/);
-  assert.match(html, /<span class="at" aria-hidden="true">@<\/span>/);
+  assert.match(html, /data-key="ooc" class="cc muted"/, 'muted: no mention marker');
+  assert.doesNotMatch(html, /<span class="at" aria-hidden="true">@<\/span>/);
   assert.match(html, /<span class="online" title="4 online" aria-hidden="true">4<\/span>/);
-  assert.match(html, /<span class="bd sh-count" aria-hidden="true">3<\/span>/);
-  assert.match(html, /aria-label="ooc, 3 unread, mentioned, muted"/, 'the chip names its state');
+  assert.doesNotMatch(html, /<span class="bd sh-count" aria-hidden="true">3<\/span>/, 'muted: no unread badge');
+  assert.match(html, /aria-label="ooc, muted"/, 'the chip names its state');
   assert.match(html, /class="topic" title="the city">the city</);
   assert.match(html, /class="msgs"[^>]*data-focus-region="channels"[^>]*style="--chan:var\(--ok\);"/);
   assert.match(html, /data-mid="1"[^>]*class="msg mention"/);
@@ -114,10 +116,10 @@ const live = (mu, props) => {
 test('a sid change drops the old subscription and watches the new session', async () => {
   const mu = fakeMu(view());
   const { p, stop } = live(mu, { sid: 's-1' });
-  assert.deepEqual(mu.subs, [['watch', 's-1']]);
+  assert.deepEqual(mu.subs, [['watch', 's-1'], ['settings.watch', 'config', 's-1']]);
   p.sid = 's-2';
   await nextTick();
-  assert.deepEqual(mu.subs, [['watch', 's-1'], ['unwatch', 's-1'], ['watch', 's-2']]);
+  assert.deepEqual(mu.subs, [['watch', 's-1'], ['settings.watch', 'config', 's-1'], ['unwatch', 's-1'], ['settings.unwatch', 'config', 's-1'], ['watch', 's-2'], ['settings.watch', 'config', 's-2']]);
   assert.deepEqual([...mu.watchers].map((w) => w.sid), ['s-2']);
   p.sid = null;
   await nextTick();
@@ -125,7 +127,7 @@ test('a sid change drops the old subscription and watches the new session', asyn
   p.sid = 's-3';
   await nextTick();
   stop();
-  assert.deepEqual(mu.subs.slice(-2), [['watch', 's-3'], ['unwatch', 's-3']], 'unmount unsubscribes');
+  assert.deepEqual(mu.subs.slice(-2), [['unwatch', 's-3'], ['settings.unwatch', 'config', 's-3']], 'unmount unsubscribes');
 });
 
 test('unread clears on a new message when the history is already at the 500 cap', async () => {
@@ -146,13 +148,13 @@ test('unread clears on a new message when the history is already at the 500 cap'
 });
 
 test('per session: touch once when the channels are known, the badge follows the unread total', () => {
-  const mu = fakeMu(view({ known: false, channels: [] }), { sessions: ['s-1'] });
+  const mu = fakeMu(view({ known: false, channels: [] }), { sessions: ['s-1'], settings: { config: { trade: { muted: true } } } });
   setup(mu);
-  assert.deepEqual(mu.calls, [], 'not known yet: nothing');
-  mu.set(view({ channels: [chan('vox', { unread: 2 }), chan('ooc', { unread: 1 }), chan('trade', { unread: 5, muted: true })] }));
+  assert.deepEqual(mu.calls.filter((c) => c[0].startsWith('panels.')), [], 'not known yet: nothing');
+  mu.set(view({ channels: [chan('vox', { unread: 2 }), chan('ooc', { unread: 1 }), chan('trade', { unread: 5 })] }));
   mu.set(view({ channels: [chan('vox', { unread: 2 }), chan('ooc', { unread: 1 })] }));
   mu.set(view({ channels: [chan('vox'), chan('ooc')] }));
-  assert.deepEqual(mu.calls, [
+  assert.deepEqual(mu.calls.filter((c) => c[0].startsWith('panels.')), [
     ['panels.touch', 'channels', 's-1'],
     ['panels.badge', 'channels', { count: 3 }, 's-1'],
     ['panels.badge', 'channels', null, 's-1'],
@@ -194,7 +196,7 @@ test('grouped messages drop the time and sender; the divider marks what was unre
 });
 
 test('the Mute tool reads Muted while pressed', async () => {
-  const html = await render(fakeMu(view({ channels: [chan('vox', { muted: true })] })), { sid: 's-1', worldId: 'w', params: {} });
+  const html = await render(fakeMu(view({ channels: [chan('vox')] }), { settings: { config: { vox: { muted: true } } } }), { sid: 's-1', worldId: 'w', params: {} });
   assert.match(html, /aria-pressed="true" data-testid="channel-mute">Muted</);
 });
 
@@ -203,10 +205,10 @@ test('reply from the message menu: the bar shows, the composer sends @sender: te
   const { stop, tree } = live(mu, { sid: 's-1' });
   await nextTick();
   const reply = mu.menus.contexts.find((c) => c.id === 'reply');
-  const target = { kind: 'channel-message', sid: 's-1', key: 'vox', message: msg(1, 'Orrin', 'anyone?') };
+  const target = { kind: 'channels.message', sid: 's-1', data: { key: 'vox', message: msg(1, 'Orrin', 'anyone?') } };
   assert.equal(reply.title(target), 'Reply to Orrin');
   assert.equal(reply.when(target), true);
-  assert.equal(reply.when({ ...target, message: msg(2, '', 'system') }), false, 'nobody to reply to');
+  assert.equal(reply.when({ ...target, data: { key: 'vox', message: msg(2, '', 'system') } }), false, 'nobody to reply to');
   reply.run(target);
   await nextTick();
   const bar = find(tree(), (n) => n.props?.['data-testid'] === 'channel-replybar');
@@ -216,7 +218,7 @@ test('reply from the message menu: the bar shows, the composer sends @sender: te
   input.props.onInput({ target: { value: 'on my way' } });
   const form = find(tree(), (n) => n.type === 'form');
   await form.props.onSubmit({ preventDefault() {} });
-  assert.deepEqual(mu.calls.filter((c) => c[0] === 'send').at(-1), ['send', '@Orrin: on my way', 'vox', 's-1']);
+  assert.deepEqual(mu.calls.filter((c) => c[0] === 'send').at(-1), ['send', '@Orrin: on my way', 'vox', 's-1', { format: '{channel} {text}' }], 'the reply format goes with it');
   await nextTick();
   assert.equal(find(tree(), (n) => n.props?.['data-testid'] === 'channel-replybar'), null, 'the bar goes after sending');
   // Another session's reply does not reach this view.
@@ -274,4 +276,127 @@ test('↑ ↓ Home End in the list move the roving focus', async () => {
   assert.deepEqual(tab(), ['-1', '-1', '0']);
   assert.equal(key('a'), false, 'other keys pass');
   stop();
+});
+
+// ── 1.2.0: settings of its own, alerts, menu kinds, Alt+C ──
+
+test('colour, alert and mute are written to the extension\'s config setting for the session\'s world, never through channels.configure', async () => {
+  const mu = fakeMu(view({ channels: [chan('vox', { unread: 2 }), chan('ooc')] }), { settings: { config: { vox: { muted: true } } } });
+  const { stop, tree } = live(mu, { sid: 's-1' });
+  await nextTick();
+  find(tree(), (n) => n.props?.['data-testid'] === 'channel-cfg-btn').props.onClick();
+  await nextTick();
+  find(tree(), (n) => n.props?.['data-color'] === 'gold' && n.props?.role === 'radio').props.onClick();
+  await nextTick();
+  assert.deepEqual(mu.values.get('config'), { vox: { muted: true, color: 'gold' } });
+  find(tree(), (n) => n.type === 'select').props.onChange({ target: { value: 'all' } });
+  await nextTick();
+  assert.deepEqual(mu.values.get('config'), { vox: { muted: true, color: 'gold', alert: 'all' } });
+  // Unmute: the field goes, and what came in while muted is marked read.
+  find(tree(), (n) => n.props?.['data-testid'] === 'channel-mute').props.onClick();
+  await nextTick();
+  assert.deepEqual(mu.values.get('config'), { vox: { color: 'gold', alert: 'all' } });
+  assert.deepEqual(mu.calls.filter((c) => c[0] === 'settings.set').map((c) => c[3]), ['w', 'w', 'w'], 'per world');
+  assert.equal(mu.calls.filter((c) => c[0] === 'configure').length, 0);
+  assert.ok(mu.calls.some((c) => c[0] === 'select' && c[1] === 'vox'), 'reading the unmuted channel clears the host count');
+  // The chip follows the setting at once.
+  assert.equal(find(tree(), (n) => n.props?.['data-key'] === 'vox').props['data-color'], 'gold');
+  stop();
+});
+
+test('the composer sends with the world\'s reply format', async () => {
+  const mu = fakeMu(view(), { settings: { replyFormat: '{channel}: {text}' } });
+  const { stop, tree } = live(mu, { sid: 's-1' });
+  await nextTick();
+  find(tree(), (n) => n.props?.['data-testid'] === 'channel-input').props.onInput({ target: { value: 'hi' } });
+  await find(tree(), (n) => n.type === 'form').props.onSubmit({ preventDefault() {} });
+  assert.deepEqual(mu.calls.filter((c) => c[0] === 'send'), [['send', 'hi', 'vox', 's-1', { format: '{channel}: {text}' }]]);
+  assert.deepEqual(mu.calls.find((c) => c[0] === 'settings.get' && c[1] === 'replyFormat'), ['settings.get', 'replyFormat', { sid: 's-1' }]);
+  stop();
+});
+
+test('settings: config, replyFormat and alerts with migrateFrom, and the Channels section on the Alerts page', () => {
+  const mu = fakeMu();
+  setup(mu);
+  const s = mu.settings.schema;
+  assert.deepEqual(s.items.map((i) => [i.key, i.kind, i.scope, i.migrateFrom, i.default]), [
+    ['config', 'json', 'world', 'channels.config', {}],
+    ['replyFormat', 'text', 'both', 'channels.replyFormat', '{channel} {text}'],
+    ['alerts', 'toggle', 'both', 'alerts.channels', true],
+  ]);
+  assert.deepEqual(s.sections, [{ page: 'alerts', title: 'Channels', keys: ['alerts'] }]);
+});
+
+test('onMessage owns the settings and raises the channel alerts itself', async () => {
+  const mu = fakeMu(null, { settings: { config: { ooc: { muted: true }, trade: { alert: 'all' }, vox: { alert: 'none' } } } });
+  setup(mu);
+  assert.equal(mu.messageListeners.length, 1);
+  assert.deepEqual(mu.messageListeners[0].opts, { ownsSettings: true });
+  mu.message({ channel: 'chat', caption: 'Chat', message: msg(1, 'Orrin', 'hey Vesper', { mention: true }), seq: 7 });
+  mu.message({ channel: 'chat', message: msg(2, 'Orrin', 'no mention') });
+  mu.message({ channel: 'ooc', message: msg(3, 'Orrin', 'muted Vesper', { mention: true }) });
+  mu.message({ channel: 'trade', caption: 'Trade', message: msg(4, 'Quill', 'selling') });
+  mu.message({ channel: 'vox', message: msg(5, 'Quill', 'Vesper', { mention: true }) });
+  mu.message({ channel: 'chat', message: msg(6, 'Orrin', 'Vesper again', { mention: true }), read: true });
+  assert.deepEqual(mu.notify.mentions, [
+    { sid: 's-1', title: 'Orrin · Chat', body: 'hey Vesper', key: 'channel:chat:7' },
+    { sid: 's-1', title: 'Quill · Trade', body: 'selling' },
+  ]);
+  // Channel alerts off.
+  mu.values.set('alerts', false);
+  mu.message({ channel: 'chat', message: msg(7, 'Orrin', 'Vesper', { mention: true }) });
+  assert.equal(mu.notify.mentions.length, 2);
+  assert.deepEqual(mu.calls.filter((c) => c[0] === 'settings.get').at(-1), ['settings.get', 'alerts', { sid: 's-1' }], 'read for the message\'s session');
+});
+
+test('rows publish channels.message targets with data; chips publish channels.channel', async () => {
+  const mu = fakeMu(view({ messages: { vox: [msg(1, 'Orrin', 'a')] } }));
+  const { stop, tree } = live(mu, { sid: 's-1' });
+  await nextTick();
+  globalThis.HTMLElement ??= class {};
+  const fakeEl = () => { const el = new HTMLElement(); el.isConnected = true; el.ls = []; el.addEventListener = (t, f) => el.ls.push([t, f]); el.removeEventListener = (t, f) => { el.ls = el.ls.filter((x) => x[1] !== f); }; return el; };
+  // A function ref, as Vue calls it on mount (h() outside a render keeps it under `.r`).
+  const callRef = (n, el) => (typeof n.ref === 'function' ? n.ref : n.ref.r)(el);
+  callRef(find(tree(), (n) => n.props?.['data-mid'] === 1), fakeEl());
+  const chipEl = fakeEl();
+  callRef(find(tree(), (n) => n.props?.['data-key'] === 'vox'), chipEl);
+  assert.deepEqual(mu.menus.targets, [
+    { kind: 'channels.message', sid: 's-1', data: { key: 'vox', message: msg(1, 'Orrin', 'a') } },
+    { kind: 'channels.channel', sid: 's-1', data: { key: 'vox' } },
+  ]);
+  // A right-click that no menu took opens the settings strip.
+  const [, onCtx] = chipEl.ls.find((x) => x[0] === 'contextmenu');
+  let prevented = false;
+  onCtx({ defaultPrevented: false, preventDefault() { prevented = true; } });
+  await nextTick();
+  assert.ok(prevented);
+  assert.ok(find(tree(), (n) => n.props?.['data-testid'] === 'channel-cfg'), 'settings strip open');
+  stop();
+});
+
+test('focus.channels (Alt+C): the Channels panel, else a pop-out; opens nothing', () => {
+  const mu = fakeMu();
+  setup(mu);
+  const cmd = mu.commandMap.get('focus.channels');
+  assert.deepEqual({ title: cmd.title, keys: cmd.keys, group: cmd.group, when: cmd.when }, { title: 'Go to channels', keys: ['Alt+C'], group: 'Focus', when: 'session' });
+  cmd.run();
+  assert.deepEqual(mu.calls.filter((c) => c[0] === 'panels.focus'), [['panels.focus', 'channels'], ['panels.focus', 'channel']]);
+  mu.panels.open_.add('channels');
+  cmd.run();
+  assert.deepEqual(mu.calls.filter((c) => c[0] === 'panels.focus').slice(2), [['panels.focus', 'channels']]);
+  assert.equal(mu.calls.filter((c) => c[0] === 'panels.open').length, 0);
+});
+
+test('the manifest declares the same settings, command and menu entries setup registers', async () => {
+  const { readFileSync } = await import('node:fs');
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  const c = pkg.muclient.contributes;
+  const { SETTINGS } = await import('../src/settings.ts');
+  assert.deepEqual(c.settings, JSON.parse(JSON.stringify(SETTINGS)));
+  const mu = fakeMu();
+  setup(mu);
+  const cmd = mu.commandMap.get('focus.channels');
+  assert.deepEqual(c.commands, [{ id: cmd.id, title: cmd.title, keys: cmd.keys }]);
+  assert.deepEqual(c.contextMenus.map((m) => [m.id, m.target]), mu.menus.contexts.map((m) => [m.id, m.target]));
+  assert.equal(pkg.muclient.api, '^1.14');
 });

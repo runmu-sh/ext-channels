@@ -1,7 +1,7 @@
 {
   "name": "@runmu.sh/ext-channels",
-  "version": "1.1.0",
-  "description": "The Channels panel: the game's chat channels as a rail of chips with unread and mention markers, one channel's messages with search, colours and alerts, a composer, and a pop-out per channel, from GMCP Comm.Channel.*.",
+  "version": "1.2.0",
+  "description": "The Channels panel: the game's chat channels as a rail of chips with unread and mention markers, one channel's messages with search, colours and alerts, a composer, and a pop-out per channel, from GMCP Comm.Channel.*. It keeps its own channel settings and raises channel alerts.",
   "keywords": [
     "channels",
     "chat",
@@ -35,8 +35,8 @@
     "test": "node --experimental-strip-types --test \"tests/*.test.mjs\""
   },
   "devDependencies": {
-    "@muclient/sdk": "npm:@runmu.sh/sdk@^1.12.0",
-    "@runmu.sh/dev": "^0.2.0",
+    "@muclient/sdk": "npm:@runmu.sh/sdk@^1.14.0",
+    "@runmu.sh/dev": "^0.3.0",
     "esbuild": "^0.28.2",
     "typescript": "^5.9.0",
     "vue": "^3.5.0"
@@ -46,10 +46,10 @@
   },
   "muclient": {
     "id": "channels",
-    "api": "^1.12",
+    "api": "^1.14",
     "source": "src/index.ts",
     "displayName": "Channels",
-    "description": "The Channels panel: the game's chat channels as a rail of chips with unread and mention markers, one channel's messages with search, colours and alerts, a composer, and a pop-out per channel, from GMCP Comm.Channel.*.",
+    "description": "The Channels panel: the game's chat channels as a rail of chips with unread and mention markers, one channel's messages with search, colours and alerts, a composer, and a pop-out per channel, from GMCP Comm.Channel.*. It keeps its own channel settings and raises channel alerts.",
     "categories": [
       "interface",
       "communication"
@@ -70,6 +70,56 @@
           "order": 21
         }
       ],
+      "commands": [
+        {
+          "id": "focus.channels",
+          "title": "Go to channels",
+          "keys": [
+            "Alt+C"
+          ]
+        }
+      ],
+      "settings": {
+        "title": "Channels",
+        "items": [
+          {
+            "key": "config",
+            "label": "Channel settings",
+            "kind": "json",
+            "default": {},
+            "scope": "world",
+            "hint": "Mute, alerts and colour per channel, for this world. Set them from the panel.",
+            "migrateFrom": "channels.config"
+          },
+          {
+            "key": "replyFormat",
+            "label": "Reply format",
+            "kind": "text",
+            "default": "{channel} {text}",
+            "scope": "both",
+            "hint": "{channel} and {text} are replaced",
+            "migrateFrom": "channels.replyFormat"
+          },
+          {
+            "key": "alerts",
+            "label": "Channel alerts",
+            "kind": "toggle",
+            "default": true,
+            "scope": "both",
+            "hint": "A channel message that alerts (by its channel setting) raises a mention: badge, toast, sound and desktop notification per Settings → Alerts.",
+            "migrateFrom": "alerts.channels"
+          }
+        ],
+        "sections": [
+          {
+            "page": "alerts",
+            "title": "Channels",
+            "keys": [
+              "alerts"
+            ]
+          }
+        ]
+      },
       "gmcp": [
         {
           "package": "Comm.Channel 1",
@@ -92,12 +142,12 @@
       "contextMenus": [
         {
           "id": "reply",
-          "target": "channel-message",
+          "target": "channels.message",
           "title": "Reply to <sender>"
         },
         {
           "id": "copy",
-          "target": "channel-message",
+          "target": "channels.message",
           "title": "Copy message"
         }
       ]

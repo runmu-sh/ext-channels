@@ -8,7 +8,11 @@ import {
   makeMatcher, searchText, searchMessages, countText, stepIndex, clampHit, activeHitId, searchKey, isFindKey,
   isChannelColor, colorVar, tintStyle, swatchStyle, soloOf, activeKeyOf, activeOf, railOf, messagesOf, bodyOf, readAction, popOutArgs, hhmm,
 } from '../src/logic.ts';
-import { chan, msg, view } from './fake.mjs';
+import { chan, msg, view as hostView } from './fake.mjs';
+import { withConfig } from '../src/logic.ts';
+
+/** The panel's view of the host's channels: with no settings, or with a `config` value. */
+const view = (over = {}, config = {}) => withConfig(hostView(over), config);
 
 const MSGS = [msg(1, 'Orrin', 'the bells toll at dusk'), msg(2, 'Quill', 'more Bells?'), msg(3, 'Maren', 'quiet now'), msg(4, '', 'System notice')];
 
@@ -140,6 +144,8 @@ test('readAction: the full panel selects, the pop-out marks read, nothing when r
   assert.equal(readAction(view(), ''), null);
   assert.equal(readAction(v, 'trade'), null);
   assert.equal(readAction(null, ''), null);
+  // A muted channel shows no unread, but reading it still clears the host's count.
+  assert.deepEqual(readAction(view({ channels: [chan('vox', { unread: 2 })] }, { vox: { muted: true } }), ''), { op: 'select', key: 'vox' });
 });
 
 test('popOutArgs: the channel panel, the instance and the title', () => {
@@ -183,7 +189,7 @@ test('replyText: @sender: text', () => {
 });
 
 test('badgeOf: the unread total of unmuted channels, null when none', () => {
-  assert.deepEqual(badgeOf(view({ channels: [chan('vox', { unread: 2 }), chan('ooc', { unread: 3, muted: true }), chan('t', { unread: 1 })] })), { count: 3 });
+  assert.deepEqual(badgeOf(view({ channels: [chan('vox', { unread: 2 }), chan('ooc', { unread: 3 }), chan('t', { unread: 1 })] }, { ooc: { muted: true } })), { count: 3 });
   assert.equal(badgeOf(view()), null);
   assert.equal(badgeOf(null), null);
 });
@@ -198,4 +204,51 @@ test('moveIndex: arrows, Home, End; from the list itself the newest', () => {
   assert.equal(moveIndex('End', 0, 5), 4);
   assert.equal(moveIndex('x', 0, 5), null);
   assert.equal(moveIndex('ArrowUp', -1, 0), null);
+});
+
+// ── 1.2.0: the extension's own channel settings and alerts ──
+import { normConfig, patchConfig, alertFor, mentionOf } from '../src/logic.ts';
+
+test('normConfig keeps muted, a known alert and a palette colour; drops the rest', () => {
+  assert.deepEqual(normConfig(null), {});
+  assert.deepEqual(normConfig([]), {});
+  assert.deepEqual(normConfig({ vox: { muted: true, alert: 'all', color: 'ok' }, ooc: { muted: false, alert: 'loud', color: '#fff' }, x: 3 }), { vox: { muted: true, alert: 'all', color: 'ok' } });
+});
+
+test('patchConfig: sets, clears colour with null, unmute removes the field, an empty entry goes', () => {
+  let c = patchConfig({}, 'vox', { color: 'gold' });
+  assert.deepEqual(c, { vox: { color: 'gold' } });
+  c = patchConfig(c, 'vox', { muted: true, alert: 'none' });
+  assert.deepEqual(c, { vox: { color: 'gold', muted: true, alert: 'none' } });
+  c = patchConfig(c, 'vox', { color: null, muted: false });
+  assert.deepEqual(c, { vox: { alert: 'none' } });
+  assert.deepEqual(patchConfig(c, 'vox', { color: 'url(x)' }), { vox: { alert: 'none' } }, 'a free colour is ignored');
+  assert.deepEqual(patchConfig({ vox: { muted: true } }, 'vox', { muted: false }), {});
+  assert.deepEqual(patchConfig({ ooc: { color: 'ok' } }, 'vox', { alert: 'all' }), { ooc: { color: 'ok' }, vox: { alert: 'all' } }, 'other channels stay');
+});
+
+test('withConfig: mute, alert and colour from the setting; a muted channel shows no unread or mention', () => {
+  const v = withConfig(hostView({ channels: [chan('vox', { unread: 2, mention: true }), chan('ooc', { unread: 1 })] }), { vox: { muted: true }, ooc: { color: 'ok', alert: 'all' } });
+  assert.deepEqual(v.channels.map((c) => [c.key, c.muted, c.unread, c.hostUnread, c.mention, c.alert, c.color]), [
+    ['vox', true, 0, 2, false, 'mentions', null],
+    ['ooc', false, 1, 1, false, 'all', 'ok'],
+  ]);
+  assert.equal(withConfig(null, {}), null);
+});
+
+test('alertFor: the toggle, read elsewhere, muted, and the channel alert setting', () => {
+  const e = (over = {}, m = {}) => ({ channel: 'vox', read: false, message: msg(1, 'Orrin', 'hi', m), ...over });
+  assert.equal(alertFor(e({}, { mention: true }), {}, true), true, 'default: mentions only');
+  assert.equal(alertFor(e(), {}, true), false);
+  assert.equal(alertFor(e(), { vox: { alert: 'all' } }, true), true);
+  assert.equal(alertFor(e({}, { mention: true }), { vox: { alert: 'none' } }, true), false);
+  assert.equal(alertFor(e({}, { mention: true }), { vox: { muted: true, alert: 'all' } }, true), false, 'muted');
+  assert.equal(alertFor(e({}, { mention: true }), {}, false), false, 'Channel alerts off');
+  assert.equal(alertFor(e({ read: true }, { mention: true }), {}, true), false, 'read on another device');
+});
+
+test('mentionOf: sender · caption, the text, a key from the seq', () => {
+  const base = { sid: 's-1', worldId: 'w', channel: 'vox', caption: 'Vox', message: msg(1, 'Orrin', 'hi'), read: false };
+  assert.deepEqual(mentionOf(base), { sid: 's-1', title: 'Orrin · Vox', body: 'hi' });
+  assert.deepEqual(mentionOf({ ...base, seq: 42 }), { sid: 's-1', title: 'Orrin · Vox', body: 'hi', key: 'channel:vox:42' });
 });

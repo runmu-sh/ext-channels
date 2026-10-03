@@ -9,17 +9,18 @@
  * channel read, and it survives a layout reload.
  */
 import { computed, defineComponent, h, nextTick, onBeforeUnmount, ref, shallowRef, watch, type PropType, type VNode } from 'vue';
-import { CHANNEL_COLORS, type ChannelColor, type ChannelMessage, type ChannelView, type ChannelsView, type Dispose, type Mu } from '@muclient/sdk';
+import { CHANNEL_COLORS, type ChannelColor, type ChannelMessage, type ChannelsView, type Dispose, type Mu } from '@muclient/sdk';
 import { COPY } from './copy.ts';
 import {
   activeHitId, activeKeyOf, activeOf, atBottom, bodyOf, clampHit, countText, firstUnreadId, groupedIds, hhmm, isFindKey, messagesOf,
-  moveIndex, newerThan, popOutArgs, railOf, readAction, replyText, searchKey, searchMessages, soloOf, stepIndex, swatchStyle, tintStyle,
+  moveIndex, newerThan, normConfig, patchConfig, popOutArgs, railOf, readAction, replyText, searchKey, searchMessages, soloOf, stepIndex,
+  swatchStyle, tintStyle, withConfig, type Alert, type ChanConfig, type ChannelRow,
 } from './logic.ts';
+import { KIND_CHANNEL, KIND_MESSAGE, SETTING } from './settings.ts';
 
 /** "Reply to X" from the message menu (index.ts) reaches every mounted view: (sid, channel key, sender). */
 export type ReplyBus = Set<(sid: string, key: string, sender: string) => void>;
 
-type Alert = 'all' | 'mentions' | 'none';
 const cls = (...xs: Array<string | false | null | undefined>) => xs.filter(Boolean).join(' ');
 
 const INPUT = '[data-testid="channel-input"]';
@@ -49,14 +50,22 @@ export function createChannelsPanel(mu: Mu, replies: ReplyBus = new Set()) {
     },
     setup(props) {
       const solo = computed(() => soloOf(props.params));
-      const st = shallowRef<ChannelsView | null>(null);
-      // Follow the panel's session: a new sid drops the old subscription and watches the new one (watch calls
-      // back with the current view at once, so no separate get).
+      const hostView = shallowRef<ChannelsView | null>(null);
+      // The per-channel settings of the session's world: this extension's `config` setting (1.2.0).
+      const config = shallowRef<ChanConfig>({});
+      // Follow the panel's session: a new sid drops the old subscriptions and watches the new one (both watches call
+      // back with the current value at once, so no separate get).
       watch(() => props.sid, (sid, _old, onCleanup) => {
-        st.value = null;
+        hostView.value = null;
+        config.value = {};
         if (!sid) return;
-        onCleanup(mu.channels.watch((v) => { st.value = v; }, sid));
+        const offs = [
+          mu.channels.watch((v) => { hostView.value = v; }, sid),
+          mu.settings.watch<unknown>(SETTING.config, (v) => { config.value = normConfig(v); }, { sid }),
+        ];
+        onCleanup(() => { for (const o of offs) o(); });
       }, { immediate: true });
+      const st = computed(() => withConfig(hostView.value, config.value));
 
       const activeKey = computed(() => activeKeyOf(st.value, solo.value));
       const active = computed(() => activeOf(st.value, solo.value));
@@ -71,8 +80,14 @@ export function createChannelsPanel(mu: Mu, replies: ReplyBus = new Set()) {
       const muted = computed(() => !!active.value?.muted);
       const alert = computed<Alert>(() => active.value?.alert ?? 'mentions');
       const color = computed<ChannelColor | null>(() => active.value?.color ?? null);
+      /** Save a change to the active channel's settings in the session's world. Unmuting marks the channel read, so what came in while it was muted does not show as unread. */
       const configure = (patch: { muted?: boolean; alert?: Alert; color?: ChannelColor | null }) => {
-        if (props.sid && active.value) mu.channels.configure(active.value.key, patch, props.sid);
+        const a = active.value, sid = props.sid;
+        if (!sid || !a) return;
+        const worldId = props.worldId || mu.sessions.list().find((x) => x.id === sid)?.worldId;
+        if (!worldId) return;
+        mu.settings.set(SETTING.config, patchConfig(config.value, a.key, patch), worldId);
+        if (patch.muted === false && a.hostUnread) mu.channels.markRead(a.key, sid);
       };
 
       // ── the "new" divider: before the first message that was unread when the channel was opened ──
@@ -163,15 +178,35 @@ export function createChannelsPanel(mu: Mu, replies: ReplyBus = new Set()) {
       replies.add(onReply);
       onBeforeUnmount(() => { replies.delete(onReply); });
 
-      // ── the message context menu: each row is a `channel-message` target (core and extension entries) ──
+      // ── the message context menu: each row is a `channels.message` target (this extension's and other extensions' entries) ──
       const rowTargets = new Map<number, { el: HTMLElement; off: Dispose }>();
       function markRow(el: Element | null, m: ChannelMessage) {
         if (!(el instanceof HTMLElement) || !props.sid || typeof mu.menus?.target !== 'function') return;
         const had = rowTargets.get(m.id);
         if (had?.el === el) return;
         had?.off();
-        rowTargets.set(m.id, { el, off: mu.menus.target(el, { kind: 'channel-message', sid: props.sid, key: activeKey.value, message: m }) });
+        rowTargets.set(m.id, { el, off: mu.menus.target(el, { kind: KIND_MESSAGE, sid: props.sid, data: { key: activeKey.value, message: m } }) });
       }
+      // ── a chip is a `channels.channel` target; a right-click no menu entry takes opens the channel's settings ──
+      const chipTargets = new Map<string, { el: HTMLElement; off: Dispose }>();
+      function markChip(el: Element | null, key: string) {
+        if (!(el instanceof HTMLElement) || !props.sid) return;
+        const had = chipTargets.get(key);
+        if (had?.el === el) return;
+        had?.off();
+        const offs: Dispose[] = [];
+        if (typeof mu.menus?.target === 'function') offs.push(mu.menus.target(el, { kind: KIND_CHANNEL, sid: props.sid, data: { key } }));
+        // Added after the target, so the host's menu listener runs first and prevents the default when it opened a menu.
+        const onCtx = (e: Event) => { if (e.defaultPrevented) return; e.preventDefault(); cfgFor(key); };
+        el.addEventListener('contextmenu', onCtx);
+        offs.push(() => el.removeEventListener('contextmenu', onCtx));
+        chipTargets.set(key, { el, off: () => { for (const o of offs) o(); } });
+      }
+      watch(() => rail.value.map((c) => c.key).join(','), () => {
+        const live = new Set(rail.value.map((c) => c.key));
+        for (const [k, r] of chipTargets) if (!live.has(k) || !r.el.isConnected) { r.off(); chipTargets.delete(k); }
+      }, { flush: 'post' });
+      onBeforeUnmount(() => { for (const r of chipTargets.values()) r.off(); chipTargets.clear(); });
       watch(() => msgs.value.map((m) => m.id).join(','), () => {
         const live = new Set(msgs.value.map((m) => m.id));
         for (const [id, r] of rowTargets) if (!live.has(id) || !r.el.isConnected) { r.off(); rowTargets.delete(id); }
@@ -196,7 +231,9 @@ export function createChannelsPanel(mu: Mu, replies: ReplyBus = new Set()) {
         const t = replyText(replyTo.value, draft.value);
         draft.value = '';
         replyTo.value = '';
-        await mu.channels.send(t, activeKey.value, props.sid);
+        // The world's reply format (this extension's `replyFormat` setting); the host fills {channel} and {text}.
+        const format = mu.settings.get<string>(SETTING.replyFormat, { sid: props.sid });
+        await mu.channels.send(t, activeKey.value, props.sid, typeof format === 'string' && format.trim() ? { format } : undefined);
       }
       // Keyed on the last message id, not the count: the host caps a channel's history (500), so the length
       // stops changing once it is full while new messages keep arriving.
@@ -217,14 +254,14 @@ export function createChannelsPanel(mu: Mu, replies: ReplyBus = new Set()) {
         if (view.value && activeHit.value < 0 && stuck.value) view.value.scrollTop = view.value.scrollHeight;
       }, { immediate: true });
 
-      const chip = (ch: ChannelView): VNode => h('button', {
+      const chip = (ch: ChannelRow): VNode => h('button', {
         key: ch.key, type: 'button', 'data-key': ch.key,
         class: cls('cc', ch.key === activeKey.value && 'on', ch.muted && 'muted', ch.mention && 'mention', !!ch.color && 'tinted'),
         style: tintStyle(ch.color), 'data-color': ch.color || undefined, 'aria-pressed': String(ch.key === activeKey.value),
         'aria-current': ch.key === activeKey.value ? 'true' : undefined,
         'aria-label': COPY.chipLabel(ch.caption, ch.unread, ch.mention, ch.online, ch.muted), title: ch.caption,
         onClick: () => pick(ch.key),
-        onContextmenu: (e: MouseEvent) => { e.preventDefault(); cfgFor(ch.key); },
+        ref: ((el: unknown) => markChip(el as Element | null, ch.key)) as never,
       }, [
         h('span', { class: 'name' }, ch.caption),
         ch.mention ? h('span', { class: 'at', 'aria-hidden': 'true' }, '@') : null,
@@ -305,7 +342,7 @@ export function createChannelsPanel(mu: Mu, replies: ReplyBus = new Set()) {
         return out;
       };
 
-      const messages = (a: ChannelView) => h('div', { class: 'msgs-wrap' }, [
+      const messages = (a: ChannelRow) => h('div', { class: 'msgs-wrap' }, [
         h('div', {
           ref: view, class: 'msgs', role: 'log', 'data-focus-region': 'channels', tabindex: '-1', 'data-testid': 'channel-msgs', style: tintStyle(a.color),
           'aria-label': COPY.messagesLabel(a.caption), onScroll, onKeydown: onListKey,
